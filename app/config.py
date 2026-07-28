@@ -17,8 +17,13 @@ class Settings(BaseSettings):
     azure_openai_deployment: str
     azure_openai_api_version: str = "2024-02-15-preview"
 
-    mail_from: str
-    sqlite_path: str = "./meeting_agent.db"
+    acs_connection_string: str
+    acs_email_from: str
+
+    cosmos_connection_string: str
+    cosmos_database: str = "meeting-intelligence"
+    cosmos_container: str = "transcripts"
+
     copilot_api_key: str = ""
 
     model_config = SettingsConfigDict(

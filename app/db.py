@@ -1,56 +1,54 @@
-import json
-import sqlite3
-from contextlib import contextmanager
+import logging
+import re
+from datetime import datetime, timezone
+from functools import lru_cache
+
+from pymongo import MongoClient
+from pymongo.errors import OperationFailure
 
 from app.config import settings
 
-
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.sqlite_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def _cursor():
-    conn = _connect()
-    cur = conn.cursor()
+@lru_cache(maxsize=1)
+def _get_collection():
+    if not settings.cosmos_connection_string:
+        raise RuntimeError("Cosmos DB is not configured. Set COSMOS_CONNECTION_STRING.")
+    client = MongoClient(settings.cosmos_connection_string)
+    database = client[settings.cosmos_database]
+    return database[settings.cosmos_container]
+
+
+def _ensure_index(collection, keys, **kwargs) -> None:
     try:
-        yield cur
-        conn.commit()
-    finally:
-        conn.close()
+        collection.create_index(keys, **kwargs)
+    except OperationFailure as exc:
+        # Cosmos DB for MongoDB may reject index changes on existing collections.
+        logger.warning("Skipping index creation for %s: %s", keys, exc.details or str(exc))
 
 
 def init_db() -> None:
-    with _cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS processed_transcripts (
-                transcript_id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                meeting_title TEXT,
-                attendee_emails TEXT,
-                summary TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_meeting_id ON processed_transcripts(meeting_id)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_meeting_title ON processed_transcripts(meeting_title)"
-        )
+    collection = _get_collection()
+    # Non-unique indexes only; Cosmos MongoDB restricts unique index changes on existing collections.
+    _ensure_index(collection, "transcript_id")
+    _ensure_index(collection, "meeting_id")
+    _ensure_index(collection, [("created_at", -1)])
+
+
+def _to_record(item: dict) -> dict:
+    return {
+        "transcript_id": item.get("transcript_id", ""),
+        "meeting_id": item.get("meeting_id", ""),
+        "meeting_title": item.get("meeting_title") or "Microsoft Teams Meeting",
+        "attendee_emails": item.get("attendee_emails") or [],
+        "summary": item.get("summary") or "",
+        "created_at": item.get("created_at", ""),
+    }
 
 
 def is_processed(transcript_id: str) -> bool:
-    with _cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM processed_transcripts WHERE transcript_id = ? LIMIT 1",
-            (transcript_id,),
-        )
-        return cur.fetchone() is not None
+    return _get_collection().find_one({"transcript_id": transcript_id}, {"_id": 1}) is not None
 
 
 def mark_processed(
@@ -60,66 +58,40 @@ def mark_processed(
     meeting_title: str = "",
     attendee_emails: list[str] | None = None,
 ) -> None:
-    emails_json = json.dumps(attendee_emails or [])
-    with _cursor() as cur:
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO processed_transcripts
-            (transcript_id, meeting_id, meeting_title, attendee_emails, summary)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (transcript_id, meeting_id, meeting_title, emails_json, summary),
-        )
-
-
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    return {
-        "transcript_id": row["transcript_id"],
-        "meeting_id": row["meeting_id"],
-        "meeting_title": row["meeting_title"] or "Microsoft Teams Meeting",
-        "attendee_emails": json.loads(row["attendee_emails"] or "[]"),
-        "summary": row["summary"] or "",
-        "created_at": row["created_at"],
+    document = {
+        "transcript_id": transcript_id,
+        "meeting_id": meeting_id,
+        "meeting_title": meeting_title,
+        "attendee_emails": attendee_emails or [],
+        "summary": summary,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    _get_collection().update_one(
+        {"transcript_id": transcript_id},
+        {"$set": document},
+        upsert=True,
+    )
 
 
 def get_by_meeting_id(meeting_id: str) -> dict | None:
-    with _cursor() as cur:
-        cur.execute(
-            """
-            SELECT * FROM processed_transcripts
-            WHERE meeting_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (meeting_id,),
-        )
-        row = cur.fetchone()
-        return _row_to_dict(row) if row else None
+    item = _get_collection().find_one(
+        {"meeting_id": meeting_id},
+        sort=[("created_at", -1)],
+    )
+    return _to_record(item) if item else None
 
 
 def list_recent(limit: int = 10) -> list[dict]:
-    with _cursor() as cur:
-        cur.execute(
-            """
-            SELECT * FROM processed_transcripts
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        return [_row_to_dict(row) for row in cur.fetchall()]
+    items = _get_collection().find().sort("created_at", -1).limit(limit)
+    return [_to_record(item) for item in items]
 
 
 def search_by_title(query: str, limit: int = 5) -> list[dict]:
-    with _cursor() as cur:
-        cur.execute(
-            """
-            SELECT * FROM processed_transcripts
-            WHERE meeting_title LIKE ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (f"%{query}%", limit),
-        )
-        return [_row_to_dict(row) for row in cur.fetchall()]
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    items = (
+        _get_collection()
+        .find({"meeting_title": pattern})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    return [_to_record(item) for item in items]

@@ -39,10 +39,11 @@ htmlcov/
 .eggs/
 
 # Python backend local secrets / runtime
+.env
 python-agent-backend/.env
-python-agent-backend/*.db
-python-agent-backend/*.sqlite
-python-agent-backend/*.sqlite3
+*.db
+*.sqlite
+*.sqlite3
 
 # Logs
 *.log

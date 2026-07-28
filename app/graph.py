@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import httpx
@@ -5,7 +6,10 @@ import httpx
 from app.auth import get_access_token
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+TARGET_RESOURCE = "communications/onlineMeetings/getAllTranscripts"
 
 
 def _headers(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -21,7 +25,10 @@ def _headers(extra: dict[str, str] | None = None) -> dict[str, str]:
 def _request(method: str, url: str, **kwargs) -> Any:
     with httpx.Client(timeout=30) as client:
         response = client.request(method, url, headers=_headers(kwargs.pop("headers", None)), **kwargs)
-    response.raise_for_status()
+    if response.is_error:
+        error_body = response.text
+        logger.error("Graph API %s %s failed (%s): %s", method, url, response.status_code, error_body)
+        response.raise_for_status()
     if response.text:
         if response.headers.get("content-type", "").startswith("application/json"):
             return response.json()
@@ -34,30 +41,33 @@ def list_subscriptions() -> list[dict]:
     return data.get("value", [])
 
 
+def _subscription_expiry() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    expiry = datetime.now(timezone.utc) + timedelta(days=2)
+    return expiry.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+
+
 def create_subscription() -> dict:
     payload = {
         "changeType": "created",
         "notificationUrl": settings.webhook_public_url,
-        "resource": "communications/onlineMeetings/getAllTranscripts",
+        "resource": TARGET_RESOURCE,
         "expirationDateTime": _subscription_expiry(),
         "clientState": settings.client_state,
     }
-    if settings.lifecycle_notification_url:
-        payload["lifecycleNotificationUrl"] = settings.lifecycle_notification_url
+    lifecycle_url = settings.lifecycle_notification_url or settings.webhook_public_url
+    payload["lifecycleNotificationUrl"] = lifecycle_url
+    logger.info("Creating Graph subscription for resource: %s", TARGET_RESOURCE)
     return _request("POST", f"{GRAPH_BASE}/subscriptions", json=payload)
 
 
 def renew_subscription(subscription_id: str) -> dict:
     payload = {"expirationDateTime": _subscription_expiry()}
-    if settings.lifecycle_notification_url:
-        payload["lifecycleNotificationUrl"] = settings.lifecycle_notification_url
+    lifecycle_url = settings.lifecycle_notification_url or settings.webhook_public_url
+    payload["lifecycleNotificationUrl"] = lifecycle_url
+    logger.info("Renewing Graph subscription: %s", subscription_id)
     return _request("PATCH", f"{GRAPH_BASE}/subscriptions/{subscription_id}", json=payload)
-
-
-def _subscription_expiry() -> str:
-    from datetime import datetime, timedelta, timezone
-
-    return (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 
 
 def get_meeting_details(meeting_id: str, user_id: str | None = None) -> dict:

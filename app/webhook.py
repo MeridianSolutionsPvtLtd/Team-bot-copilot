@@ -1,3 +1,6 @@
+import json
+import logging
+
 from fastapi import APIRouter, Request, Response
 
 from app.config import settings
@@ -6,6 +9,8 @@ from app.graph import get_meeting_details, get_transcript_content
 from app.mailer import send_summary_email
 from app.parser import parse_graph_resource
 from app.summarizer import summarize_transcript
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -37,8 +42,25 @@ async def graph_webhook(request: Request):
     if request.method == "GET":
         return Response(content="Webhook endpoint is active.", media_type="text/plain", status_code=200)
 
-    payload = await request.json()
+    raw_body = await request.body()
+    if not raw_body.strip():
+        logger.info("Received empty webhook POST body.")
+        return Response(content="", status_code=202)
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        logger.warning("Received non-JSON webhook POST body.")
+        return Response(content="", status_code=202)
+
+    if payload.get("lifecycleEvent"):
+        logger.info("Received lifecycle notification: %s", payload.get("lifecycleEvent"))
+        return Response(content="", status_code=202)
+
     notifications = payload.get("value", [])
+    if not isinstance(notifications, list):
+        logger.warning("Unexpected webhook payload format.")
+        return Response(content="", status_code=202)
 
     for item in notifications:
         if item.get("clientState") != settings.client_state:
@@ -68,8 +90,10 @@ async def graph_webhook(request: Request):
                 attendee_emails=emails,
             )
         except Exception:
-            # Return accepted so Graph does not continuously retry batch;
-            # production apps should also push failures to a queue/dead-letter store.
+            logger.exception(
+                "Failed to process transcript event for meeting %s",
+                parsed.meeting_id,
+            )
             continue
 
-    return {"status": "accepted"}
+    return Response(content="", status_code=202)

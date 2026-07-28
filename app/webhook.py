@@ -27,11 +27,15 @@ def _extract_attendee_emails(meeting_details: dict) -> list[str]:
     return list(set(emails))
 
 
+@router.get("/webhook")
 @router.post("/webhook")
 async def graph_webhook(request: Request):
     validation_token = request.query_params.get("validationToken")
     if validation_token:
         return Response(content=validation_token, media_type="text/plain", status_code=200)
+
+    if request.method == "GET":
+        return Response(content="Webhook endpoint is active.", media_type="text/plain", status_code=200)
 
     payload = await request.json()
     notifications = payload.get("value", [])

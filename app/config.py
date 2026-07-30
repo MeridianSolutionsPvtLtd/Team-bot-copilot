@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     copilot_api_key: str = ""
 
+    display_timezone: str = "Asia/Kolkata"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

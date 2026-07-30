@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -22,6 +23,15 @@ def _headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return base
 
 
+def _parse_graph_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _request(method: str, url: str, **kwargs) -> Any:
     with httpx.Client(timeout=30) as client:
         response = client.request(method, url, headers=_headers(kwargs.pop("headers", None)), **kwargs)
@@ -42,8 +52,6 @@ def list_subscriptions() -> list[dict]:
 
 
 def _subscription_expiry() -> str:
-    from datetime import datetime, timedelta, timezone
-
     expiry = datetime.now(timezone.utc) + timedelta(days=2)
     return expiry.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
@@ -76,8 +84,12 @@ def get_meeting_details(meeting_id: str, user_id: str | None = None) -> dict:
     return _request("GET", f"{GRAPH_BASE}/communications/onlineMeetings/{meeting_id}")
 
 
-def get_attendance_records(meeting_id: str, user_id: str | None = None) -> list[dict]:
-    """Attendance records list everyone who actually joined, including external guests."""
+def get_attendance_records(meeting_id: str, user_id: str | None = None) -> list[dict] | None:
+    """Attendance records list everyone who actually joined, including external guests.
+
+    Returns None when Graph rejected the call (permissions/access), and an empty list
+    when the report simply has not been generated yet.
+    """
     base = (
         f"{GRAPH_BASE}/users/{user_id}/onlineMeetings/{meeting_id}"
         if user_id
@@ -87,12 +99,48 @@ def get_attendance_records(meeting_id: str, user_id: str | None = None) -> list[
         data = _request("GET", f"{base}/attendanceReports?$expand=attendanceRecords")
     except Exception as exc:
         logger.warning("Could not read attendance reports for meeting %s: %s", meeting_id, exc)
-        return []
+        return None
 
     records: list[dict] = []
     for report in (data or {}).get("value", []):
         records.extend(report.get("attendanceRecords") or [])
     return records
+
+
+def get_calendar_event(meeting_details: dict, user_id: str | None) -> dict | None:
+    """Locate the organizer's calendar event for this meeting.
+
+    The calendar event carries the full invitee list (including external people who
+    never joined), which onlineMeetings/participants often omits.
+    """
+    join_url = meeting_details.get("joinWebUrl") or meeting_details.get("joinUrl")
+    if not user_id or not join_url:
+        return None
+
+    start = _parse_graph_datetime(meeting_details.get("startDateTime")) or datetime.now(timezone.utc)
+    end = _parse_graph_datetime(meeting_details.get("endDateTime")) or start
+    window_start = (start - timedelta(days=1)).astimezone(timezone.utc)
+    window_end = (end + timedelta(days=1)).astimezone(timezone.utc)
+
+    url = f"{GRAPH_BASE}/users/{user_id}/calendarView"
+    params = {
+        "startDateTime": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "endDateTime": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "$select": "subject,attendees,organizer,onlineMeeting,start,end",
+        "$top": "100",
+    }
+    try:
+        data = _request("GET", url, params=params)
+    except Exception as exc:
+        logger.warning("Could not read calendar events for user %s: %s", user_id, exc)
+        return None
+
+    for event in (data or {}).get("value", []):
+        event_join_url = (event.get("onlineMeeting") or {}).get("joinUrl")
+        if event_join_url and event_join_url.split("?")[0] == join_url.split("?")[0]:
+            return event
+    logger.info("No calendar event matched join URL for meeting of user %s", user_id)
+    return None
 
 
 def get_transcript_content(meeting_id: str, transcript_id: str, user_id: str | None = None) -> str:

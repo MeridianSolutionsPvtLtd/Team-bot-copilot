@@ -24,6 +24,7 @@ def recent_meetings(limit: int = 10):
                 "meeting_id": m["meeting_id"],
                 "meeting_title": m["meeting_title"],
                 "created_at": m["created_at"],
+                "created_at_local": m["created_at_local"],
             }
             for m in meetings
         ],
@@ -43,6 +44,7 @@ def search_meetings(q: str, limit: int = 5):
                 "meeting_id": m["meeting_id"],
                 "meeting_title": m["meeting_title"],
                 "created_at": m["created_at"],
+                "created_at_local": m["created_at_local"],
             }
             for m in meetings
         ],
@@ -59,6 +61,7 @@ def get_meeting_summary(meeting_id: str):
         "meeting_title": record["meeting_title"],
         "summary": record["summary"],
         "created_at": record["created_at"],
+        "created_at_local": record["created_at_local"],
         "attendee_count": len(record["attendee_emails"]),
     }
 

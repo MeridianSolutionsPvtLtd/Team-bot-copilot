@@ -1,12 +1,12 @@
 import logging
 import re
-from datetime import datetime, timezone
 from functools import lru_cache
 
 from pymongo import MongoClient
 from pymongo.errors import OperationFailure
 
 from app.config import settings
+from app.timeutils import now_utc_iso, to_local_string
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,15 @@ def init_db() -> None:
 
 
 def _to_record(item: dict) -> dict:
+    created_at = item.get("created_at", "")
     return {
         "transcript_id": item.get("transcript_id", ""),
         "meeting_id": item.get("meeting_id", ""),
         "meeting_title": item.get("meeting_title") or "Microsoft Teams Meeting",
         "attendee_emails": item.get("attendee_emails") or [],
         "summary": item.get("summary") or "",
-        "created_at": item.get("created_at", ""),
+        "created_at": created_at,
+        "created_at_local": item.get("created_at_local") or to_local_string(created_at),
     }
 
 
@@ -58,13 +60,16 @@ def mark_processed(
     meeting_title: str = "",
     attendee_emails: list[str] | None = None,
 ) -> None:
+    # created_at stays UTC so sorting is consistent; the local field is for display only.
+    created_at = now_utc_iso()
     document = {
         "transcript_id": transcript_id,
         "meeting_id": meeting_id,
         "meeting_title": meeting_title,
         "attendee_emails": attendee_emails or [],
         "summary": summary,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at,
+        "created_at_local": to_local_string(created_at),
     }
     _get_collection().update_one(
         {"transcript_id": transcript_id},

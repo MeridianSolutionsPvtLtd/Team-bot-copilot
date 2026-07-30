@@ -25,8 +25,17 @@ class Settings(BaseSettings):
     cosmos_container: str = "transcripts"
 
     copilot_api_key: str = ""
+    # Comma-separated emails that may view any meeting summary (optional).
+    copilot_admin_emails: str = ""
 
     display_timezone: str = "Asia/Kolkata"
+
+    def admin_email_set(self) -> set[str]:
+        return {
+            email.strip().lower()
+            for email in self.copilot_admin_emails.split(",")
+            if email.strip() and "@" in email
+        }
 
     model_config = SettingsConfigDict(
         env_file=".env",

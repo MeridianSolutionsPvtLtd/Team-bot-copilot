@@ -33,6 +33,7 @@ def init_db() -> None:
     # Non-unique indexes only; Cosmos MongoDB restricts unique index changes on existing collections.
     _ensure_index(collection, "transcript_id")
     _ensure_index(collection, "meeting_id")
+    _ensure_index(collection, "attendee_emails")
     _ensure_index(collection, [("created_at", -1)])
 
 
@@ -86,16 +87,37 @@ def get_by_meeting_id(meeting_id: str) -> dict | None:
     return _to_record(item) if item else None
 
 
-def list_recent(limit: int = 10) -> list[dict]:
-    items = _get_collection().find().sort("created_at", -1).limit(limit)
+def user_can_access(record: dict, user_email: str, *, is_admin: bool = False) -> bool:
+    if is_admin:
+        return True
+    email = (user_email or "").strip().lower()
+    if not email:
+        return False
+    return email in {e.strip().lower() for e in (record.get("attendee_emails") or [])}
+
+
+def list_recent(limit: int = 10, user_email: str | None = None, *, is_admin: bool = False) -> list[dict]:
+    query: dict = {}
+    if user_email and not is_admin:
+        query["attendee_emails"] = user_email.strip().lower()
+    items = _get_collection().find(query).sort("created_at", -1).limit(limit)
     return [_to_record(item) for item in items]
 
 
-def search_by_title(query: str, limit: int = 5) -> list[dict]:
+def search_by_title(
+    query: str,
+    limit: int = 5,
+    user_email: str | None = None,
+    *,
+    is_admin: bool = False,
+) -> list[dict]:
     pattern = re.compile(re.escape(query), re.IGNORECASE)
+    filters: dict = {"meeting_title": pattern}
+    if user_email and not is_admin:
+        filters["attendee_emails"] = user_email.strip().lower()
     items = (
         _get_collection()
-        .find({"meeting_title": pattern})
+        .find(filters)
         .sort("created_at", -1)
         .limit(limit)
     )

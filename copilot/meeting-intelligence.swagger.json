@@ -1,0 +1,314 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Teams Meeting Intelligence",
+    "description": "Retrieve meeting summaries that the signed-in employee is authorized to view.",
+    "version": "1.0.0"
+  },
+  "host": "copilot-agent-fxakbsajcyh3fhaq.centralindia-01.azurewebsites.net",
+  "basePath": "/api",
+  "schemes": [
+    "https"
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "securityDefinitions": {
+    "apiKey": {
+      "type": "apiKey",
+      "name": "X-API-Key",
+      "in": "header"
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/meetings/recent": {
+      "get": {
+        "operationId": "GetRecentMeetings",
+        "summary": "Get the employee's recent meetings",
+        "description": "Lists only meetings the signed-in employee attended, unless the employee is configured as an administrator.",
+        "parameters": [
+          {
+            "$ref": "#/parameters/UserEmail"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum meetings to return, from 1 to 20.",
+            "required": false,
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 20
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent authorized meetings.",
+            "schema": {
+              "$ref": "#/definitions/MeetingList"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/meetings/search": {
+      "get": {
+        "operationId": "SearchMeetings",
+        "summary": "Search the employee's meeting summaries",
+        "description": "Searches meeting titles, returning only meetings the signed-in employee is authorized to view.",
+        "parameters": [
+          {
+            "$ref": "#/parameters/UserEmail"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Words from the meeting title.",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum matches to return, from 1 to 10.",
+            "required": false,
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 10
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized matching meetings.",
+            "schema": {
+              "$ref": "#/definitions/MeetingList"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/meetings/{meeting_id}/summary": {
+      "get": {
+        "operationId": "GetMeetingSummary",
+        "summary": "Get an authorized meeting summary",
+        "description": "Returns the summary only when the signed-in employee attended the meeting or is an administrator.",
+        "parameters": [
+          {
+            "$ref": "#/parameters/UserEmail"
+          },
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "description": "Meeting identifier returned by a recent or search operation.",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Meeting summary.",
+            "schema": {
+              "$ref": "#/definitions/MeetingSummary"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/meetings/{meeting_id}/resend": {
+      "post": {
+        "operationId": "ResendMeetingSummary",
+        "summary": "Email an authorized meeting summary again",
+        "description": "Resends the summary to its stored attendee list. Use only after the employee explicitly confirms.",
+        "parameters": [
+          {
+            "$ref": "#/parameters/UserEmail"
+          },
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "description": "Meeting identifier returned by a recent or search operation.",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Email send accepted.",
+            "schema": {
+              "$ref": "#/definitions/ResendResult"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "parameters": {
+    "UserEmail": {
+      "name": "X-User-Email",
+      "in": "header",
+      "description": "Email address of the signed-in Teams user. Map this to System.User.Email in Copilot Studio; never ask the user to type it.",
+      "required": true,
+      "type": "string",
+      "format": "email"
+    }
+  },
+  "responses": {
+    "BadRequest": {
+      "description": "Required input is missing or invalid.",
+      "schema": {
+        "$ref": "#/definitions/Error"
+      }
+    },
+    "Unauthorized": {
+      "description": "The API connection is not authorized.",
+      "schema": {
+        "$ref": "#/definitions/Error"
+      }
+    },
+    "NotFound": {
+      "description": "The meeting does not exist or the employee is not authorized to view it.",
+      "schema": {
+        "$ref": "#/definitions/Error"
+      }
+    }
+  },
+  "definitions": {
+    "MeetingCard": {
+      "type": "object",
+      "properties": {
+        "meeting_id": {
+          "type": "string"
+        },
+        "meeting_title": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "created_at_local": {
+          "type": "string"
+        }
+      }
+    },
+    "MeetingList": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "viewer": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "participant_only",
+            "all"
+          ]
+        },
+        "meetings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MeetingCard"
+          }
+        }
+      }
+    },
+    "MeetingSummary": {
+      "type": "object",
+      "properties": {
+        "meeting_id": {
+          "type": "string"
+        },
+        "meeting_title": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "created_at_local": {
+          "type": "string"
+        },
+        "attendee_count": {
+          "type": "integer"
+        },
+        "viewer": {
+          "type": "string"
+        }
+      }
+    },
+    "ResendResult": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "meeting_id": {
+          "type": "string"
+        },
+        "meeting_title": {
+          "type": "string"
+        },
+        "recipient_count": {
+          "type": "integer"
+        },
+        "requested_by": {
+          "type": "string"
+        }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

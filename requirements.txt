@@ -8,3 +8,5 @@ pydantic==2.8.2
 pydantic-settings==2.4.0
 pymongo==4.10.1
 azure-communication-email==1.0.0
+markdown==3.6
+tzdata==2024.1

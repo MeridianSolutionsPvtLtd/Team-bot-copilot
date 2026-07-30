@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, Response
 
 from app.config import settings
 from app.db import is_processed, mark_processed
-from app.graph import get_meeting_details, get_transcript_content
+from app.graph import get_attendance_records, get_meeting_details, get_transcript_content
 from app.mailer import send_summary_email
 from app.parser import parse_graph_resource
 from app.summarizer import summarize_transcript
@@ -15,21 +15,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _extract_attendee_emails(meeting_details: dict) -> list[str]:
-    attendees = meeting_details.get("participants", {}).get("attendees", [])
+def _emails_from_participant(participant: dict) -> list[str]:
+    identity = participant.get("identity") or {}
+    candidates = [participant.get("upn")]
+    # Guests and external users expose their address under different identity types.
+    for identity_type in ("user", "guest", "externalUser", "encrypted"):
+        entry = identity.get(identity_type) or {}
+        if isinstance(entry, dict):
+            candidates.extend([entry.get("id"), entry.get("displayName"), entry.get("email")])
+    return [value for value in candidates if isinstance(value, str) and "@" in value]
+
+
+def _extract_attendee_emails(meeting_details: dict, attendance_records: list[dict]) -> list[str]:
     emails: list[str] = []
-    for attendee in attendees:
-        identity = attendee.get("identity", {})
-        user = identity.get("user", {})
-        email = attendee.get("upn") or user.get("id") or user.get("displayName")
-        if email and "@" in email:
+
+    for record in attendance_records:
+        email = record.get("emailAddress")
+        if isinstance(email, str) and "@" in email:
             emails.append(email)
-    organizer = meeting_details.get("participants", {}).get("organizer", {})
-    org_user = organizer.get("identity", {}).get("user", {})
-    organizer_upn = organizer.get("upn") or org_user.get("id")
-    if organizer_upn and "@" in organizer_upn:
-        emails.append(organizer_upn)
-    return list(set(emails))
+        emails.extend(_emails_from_participant(record))
+
+    participants = meeting_details.get("participants") or {}
+    for attendee in participants.get("attendees") or []:
+        emails.extend(_emails_from_participant(attendee))
+
+    organizer = participants.get("organizer") or {}
+    emails.extend(_emails_from_participant(organizer))
+
+    return sorted({email.strip().lower() for email in emails})
 
 
 @router.get("/webhook")
@@ -79,7 +92,16 @@ async def graph_webhook(request: Request):
             meeting_title = meeting.get("subject", "Microsoft Teams Meeting")
 
             summary = summarize_transcript(meeting_title, transcript)
-            emails = _extract_attendee_emails(meeting)
+
+            attendance_records = get_attendance_records(parsed.meeting_id, parsed.user_id)
+            emails = _extract_attendee_emails(meeting, attendance_records)
+            logger.info(
+                "Resolved %d recipient(s) for meeting %s: %s",
+                len(emails),
+                parsed.meeting_id,
+                ", ".join(emails),
+            )
+
             send_summary_email(emails, meeting_title, summary)
 
             mark_processed(

@@ -76,6 +76,25 @@ def get_meeting_details(meeting_id: str, user_id: str | None = None) -> dict:
     return _request("GET", f"{GRAPH_BASE}/communications/onlineMeetings/{meeting_id}")
 
 
+def get_attendance_records(meeting_id: str, user_id: str | None = None) -> list[dict]:
+    """Attendance records list everyone who actually joined, including external guests."""
+    base = (
+        f"{GRAPH_BASE}/users/{user_id}/onlineMeetings/{meeting_id}"
+        if user_id
+        else f"{GRAPH_BASE}/communications/onlineMeetings/{meeting_id}"
+    )
+    try:
+        data = _request("GET", f"{base}/attendanceReports?$expand=attendanceRecords")
+    except Exception as exc:
+        logger.warning("Could not read attendance reports for meeting %s: %s", meeting_id, exc)
+        return []
+
+    records: list[dict] = []
+    for report in (data or {}).get("value", []):
+        records.extend(report.get("attendanceRecords") or [])
+    return records
+
+
 def get_transcript_content(meeting_id: str, transcript_id: str, user_id: str | None = None) -> str:
     headers = {"Accept": "text/vtt"}
     if user_id:

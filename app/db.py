@@ -21,8 +21,12 @@ if (settings.storage_backend or "onedrive").strip().lower() != "cosmos":
         init_db,
         is_processed,
         list_recent,
+        mark_email_sent,
         mark_processed,
+        marker_email_already_sent,
+        release_processing_claim,
         search_by_title,
+        try_claim_processing,
         user_can_access,
     )
 else:

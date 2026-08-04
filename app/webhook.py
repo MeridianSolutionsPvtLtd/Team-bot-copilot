@@ -7,7 +7,14 @@ import time
 from fastapi import APIRouter, Request, Response
 
 from app.config import settings
-from app.db import is_processed, mark_processed
+from app.db import (
+    is_processed,
+    mark_email_sent,
+    mark_processed,
+    marker_email_already_sent,
+    release_processing_claim,
+    try_claim_processing,
+)
 from app.graph import (
     get_attendance_records,
     get_calendar_event,
@@ -92,6 +99,15 @@ def _fetch_attendance_records(parsed: ParsedResource) -> list[dict]:
 
 
 def _process_transcript(parsed: ParsedResource) -> None:
+    claim_id = try_claim_processing(
+        parsed.transcript_id,
+        parsed.meeting_id,
+        organizer_user_id=parsed.user_id,
+    )
+    if not claim_id:
+        return
+
+    claimed = True
     try:
         meeting = get_meeting_details(parsed.meeting_id, parsed.user_id)
         transcript = get_transcript_content(parsed.meeting_id, parsed.transcript_id, parsed.user_id)
@@ -111,17 +127,53 @@ def _process_transcript(parsed: ParsedResource) -> None:
             ", ".join(emails) or "(none)",
         )
 
-        send_summary_email(emails, meeting_title, summary)
-        mark_processed(
+        # Summaries first, then done marker — never mark done if hard writes fail.
+        stored = mark_processed(
             parsed.transcript_id,
             parsed.meeting_id,
             summary,
             meeting_title=meeting_title,
             attendee_emails=emails,
             organizer_user_id=parsed.user_id,
+            claim_id=claim_id,
         )
+        if not stored:
+            release_processing_claim(
+                parsed.transcript_id,
+                claim_id,
+                organizer_user_id=parsed.user_id,
+            )
+            claimed = False
+            return
+
+        # Done marker is durable now; don't delete it if email fails.
+        claimed = False
+
+        if emails and not marker_email_already_sent(
+            parsed.transcript_id,
+            organizer_user_id=parsed.user_id,
+        ):
+            send_summary_email(emails, meeting_title, summary)
+            try:
+                mark_email_sent(
+                    parsed.transcript_id,
+                    claim_id,
+                    organizer_user_id=parsed.user_id,
+                )
+            except Exception:
+                # Mail already left ACS; persist failure may allow one rare duplicate on retry.
+                logger.exception(
+                    "Summary email sent for %s but failed to persist email_sent flag.",
+                    parsed.transcript_id,
+                )
     except Exception:
         logger.exception("Failed to process transcript event for meeting %s", parsed.meeting_id)
+        if claimed:
+            release_processing_claim(
+                parsed.transcript_id,
+                claim_id,
+                organizer_user_id=parsed.user_id,
+            )
     finally:
         with _inflight_lock:
             _inflight_transcripts.discard(parsed.transcript_id)

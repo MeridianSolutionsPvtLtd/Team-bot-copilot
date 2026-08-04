@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -117,7 +118,12 @@ def _ensure_folder(owner: str, path: str) -> None:
 def _put_json(owner: str, path: str, payload: dict[str, Any]) -> None:
     url = f"{_drive_item_url(owner, path)}:/content"
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    response = _request("PUT", url, headers=_headers("application/json"), content=body)
+    response = _request(
+        "PUT",
+        url,
+        headers=_headers("application/json"),
+        content=body,
+    )
     if response.is_error:
         logger.error(
             "OneDrive PUT %s for %s failed (%s): %s",
@@ -127,11 +133,23 @@ def _put_json(owner: str, path: str, payload: dict[str, Any]) -> None:
             response.text,
         )
         response.raise_for_status()
+    logger.info(
+        "OneDrive PUT OK path=%s owner=%s status=%s bytes=%d",
+        path,
+        owner,
+        response.status_code,
+        len(body),
+    )
 
 
 def _get_json(owner: str, path: str) -> dict[str, Any] | None:
+    """Download a JSON file from OneDrive. Empty / non-JSON bodies return None."""
     url = f"{_drive_item_url(owner, path)}:/content"
-    response = _request("GET", url, headers=_headers(None))
+    # Prefer the raw file bytes; avoid forcing a JSON Accept that some Graph
+    # edges answer with an empty body right after an upload.
+    headers = _headers(None)
+    headers["Accept"] = "*/*"
+    response = _request("GET", url, headers=headers)
     if response.status_code == 404:
         return None
     if response.is_error:
@@ -143,7 +161,56 @@ def _get_json(owner: str, path: str) -> dict[str, Any] | None:
             response.text,
         )
         response.raise_for_status()
-    return response.json()
+
+    raw = (response.content or b"").strip()
+    if not raw:
+        logger.warning(
+            "OneDrive GET returned empty body path=%s owner=%s status=%s content_type=%s",
+            path,
+            owner,
+            response.status_code,
+            response.headers.get("content-type"),
+        )
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "OneDrive GET non-JSON body path=%s owner=%s status=%s preview=%r err=%s",
+            path,
+            owner,
+            response.status_code,
+            raw[:120],
+            exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "OneDrive GET JSON was not an object path=%s owner=%s type=%s",
+            path,
+            owner,
+            type(data).__name__,
+        )
+        return None
+    return data
+
+
+def _get_json_with_retry(
+    owner: str,
+    path: str,
+    *,
+    attempts: int = 4,
+    delay_seconds: float = 0.75,
+) -> dict[str, Any] | None:
+    """OneDrive content can be briefly empty right after PUT — retry a few times."""
+    last: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        last = _get_json(owner, path)
+        if last is not None:
+            return last
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    return last
 
 
 def _delete_path(owner: str, path: str) -> None:
@@ -214,6 +281,10 @@ def _marker_blocks_processing(marker: dict[str, Any] | None) -> bool:
 
 def _read_marker(owner: str, transcript_id: str) -> dict[str, Any] | None:
     return _get_json(owner, _processed_path(transcript_id))
+
+
+def _read_marker_after_write(owner: str, transcript_id: str) -> dict[str, Any] | None:
+    return _get_json_with_retry(owner, _processed_path(transcript_id))
 
 
 def _write_marker(owner: str, transcript_id: str, payload: dict[str, Any]) -> None:
@@ -370,11 +441,26 @@ def try_claim_processing(
 
         _write_marker(owner, transcript_id, payload)
 
-        # Verify we won any concurrent claim race.
-        confirmed = _read_marker(owner, transcript_id)
-        if not confirmed or confirmed.get("claim_id") != claim_id:
-            logger.info("Lost processing claim race for transcript %s.", transcript_id)
+        # Verify we won any concurrent claim race. OneDrive may return an empty
+        # body for a moment after PUT, so retry before giving up.
+        confirmed = _read_marker_after_write(owner, transcript_id)
+        if confirmed is None:
+            logger.warning(
+                "Claim write succeeded for %s but re-read is still empty; "
+                "accepting in-memory claim_id=%s",
+                transcript_id,
+                claim_id,
+            )
+            return claim_id
+        if confirmed.get("claim_id") != claim_id:
+            logger.info(
+                "Lost processing claim race for transcript %s (theirs=%s ours=%s).",
+                transcript_id,
+                confirmed.get("claim_id"),
+                claim_id,
+            )
             return None
+        logger.info("Processing claim confirmed for transcript %s claim_id=%s", transcript_id, claim_id)
         return claim_id
     except Exception:
         logger.exception("Failed to claim processing lock for %s", transcript_id)

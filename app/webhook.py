@@ -118,6 +118,7 @@ def _process_transcript(parsed: ParsedResource) -> None:
             summary,
             meeting_title=meeting_title,
             attendee_emails=emails,
+            organizer_user_id=parsed.user_id,
         )
     except Exception:
         logger.exception("Failed to process transcript event for meeting %s", parsed.meeting_id)
@@ -173,7 +174,7 @@ async def graph_webhook(request: Request):
         if not parsed:
             continue
 
-        if is_processed(parsed.transcript_id):
+        if is_processed(parsed.transcript_id, organizer_user_id=parsed.user_id):
             continue
 
         _queue_transcript(parsed)

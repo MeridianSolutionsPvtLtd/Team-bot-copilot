@@ -20,7 +20,17 @@ class Settings(BaseSettings):
     acs_connection_string: str
     acs_email_from: str
 
-    cosmos_connection_string: str
+    # --- Storage: OneDrive is active; Cosmos kept for easy rollback ---
+    # Active backend: "onedrive" (default) or "cosmos"
+    storage_backend: str = "onedrive"
+
+    # OneDrive (Graph) — each attendee gets summaries in their own drive.
+    # ONEDRIVE_OWNER_UPN is optional fallback only for processed-marker if organizer id is missing.
+    onedrive_owner_upn: str = ""
+    onedrive_folder: str = "MeetingIntelligence"
+
+    # Cosmos DB for MongoDB (commented-out path in app/db.py; kept for rollback)
+    cosmos_connection_string: str = ""
     cosmos_database: str = "meeting-intelligence"
     cosmos_container: str = "transcripts"
 

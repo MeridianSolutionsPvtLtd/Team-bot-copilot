@@ -54,7 +54,7 @@ def recent_meetings(limit: int = 10, caller: dict = Depends(resolve_caller)):
     return {
         "count": len(meetings),
         "viewer": caller["email"],
-        "scope": "all" if caller["is_admin"] else "participant_only",
+        "scope": "own_onedrive",
         "meetings": [_meeting_card(m) for m in meetings],
     }
 
@@ -73,14 +73,14 @@ def search_meetings(q: str, limit: int = 5, caller: dict = Depends(resolve_calle
         "query": q,
         "count": len(meetings),
         "viewer": caller["email"],
-        "scope": "all" if caller["is_admin"] else "participant_only",
+        "scope": "own_onedrive",
         "meetings": [_meeting_card(m) for m in meetings],
     }
 
 
 @router.get("/meetings/{meeting_id}/summary", dependencies=[Depends(verify_api_key)])
 def get_meeting_summary(meeting_id: str, caller: dict = Depends(resolve_caller)):
-    record = get_by_meeting_id(meeting_id)
+    record = get_by_meeting_id(meeting_id, user_email=caller["email"])
     if not record or not user_can_access(record, caller["email"], is_admin=caller["is_admin"]):
         # Same response whether missing or forbidden — do not leak existence.
         raise HTTPException(status_code=404, detail="Meeting summary not found.")
@@ -97,7 +97,7 @@ def get_meeting_summary(meeting_id: str, caller: dict = Depends(resolve_caller))
 
 @router.post("/meetings/{meeting_id}/resend", dependencies=[Depends(verify_api_key)])
 def resend_meeting_summary(meeting_id: str, caller: dict = Depends(resolve_caller)):
-    record = get_by_meeting_id(meeting_id)
+    record = get_by_meeting_id(meeting_id, user_email=caller["email"])
     if not record or not user_can_access(record, caller["email"], is_admin=caller["is_admin"]):
         raise HTTPException(status_code=404, detail="Meeting summary not found.")
     if not record["attendee_emails"]:

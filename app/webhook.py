@@ -99,35 +99,55 @@ def _fetch_attendance_records(parsed: ParsedResource) -> list[dict]:
 
 
 def _process_transcript(parsed: ParsedResource) -> None:
+    logger.info(
+        "PROCESS start meeting_id=%s transcript_id=%s user_id=%s",
+        parsed.meeting_id,
+        parsed.transcript_id,
+        parsed.user_id,
+    )
     claim_id = try_claim_processing(
         parsed.transcript_id,
         parsed.meeting_id,
         organizer_user_id=parsed.user_id,
     )
     if not claim_id:
+        logger.warning(
+            "PROCESS skipped — could not claim lock for transcript_id=%s (already processing/done or missing organizer).",
+            parsed.transcript_id,
+        )
         return
 
+    logger.info("PROCESS claimed transcript_id=%s claim_id=%s", parsed.transcript_id, claim_id)
     claimed = True
     try:
+        logger.info("PROCESS fetching meeting details...")
         meeting = get_meeting_details(parsed.meeting_id, parsed.user_id)
-        transcript = get_transcript_content(parsed.meeting_id, parsed.transcript_id, parsed.user_id)
         meeting_title = meeting.get("subject") or "Microsoft Teams Meeting"
+        logger.info("PROCESS meeting title='%s'", meeting_title)
 
+        logger.info("PROCESS fetching transcript content...")
+        transcript = get_transcript_content(parsed.meeting_id, parsed.transcript_id, parsed.user_id)
+        logger.info("PROCESS transcript fetched chars=%d", len(transcript or ""))
+
+        logger.info("PROCESS summarizing with Azure OpenAI...")
         summary = summarize_transcript(meeting_title, transcript)
 
+        logger.info("PROCESS fetching attendance + calendar recipients...")
         attendance_records = _fetch_attendance_records(parsed)
         calendar_event = get_calendar_event(meeting, parsed.user_id)
         emails = _collect_recipients(meeting, attendance_records, calendar_event)
 
         logger.info(
-            "Recipients for '%s': %d from attendance, %d invited on calendar, final list: %s",
+            "PROCESS recipients for '%s': attendance=%d calendar_attendees=%d final=%d list=%s",
             meeting_title,
             len(attendance_records),
             len((calendar_event or {}).get("attendees") or []),
+            len(emails),
             ", ".join(emails) or "(none)",
         )
 
         # Summaries first, then done marker — never mark done if hard writes fail.
+        logger.info("PROCESS writing summaries to OneDrive...")
         stored = mark_processed(
             parsed.transcript_id,
             parsed.meeting_id,
@@ -138,6 +158,10 @@ def _process_transcript(parsed: ParsedResource) -> None:
             claim_id=claim_id,
         )
         if not stored:
+            logger.error(
+                "PROCESS aborted — OneDrive mark_processed failed for transcript_id=%s",
+                parsed.transcript_id,
+            )
             release_processing_claim(
                 parsed.transcript_id,
                 claim_id,
@@ -146,6 +170,7 @@ def _process_transcript(parsed: ParsedResource) -> None:
             claimed = False
             return
 
+        logger.info("PROCESS OneDrive storage completed for transcript_id=%s", parsed.transcript_id)
         # Done marker is durable now; don't delete it if email fails.
         claimed = False
 
@@ -153,6 +178,7 @@ def _process_transcript(parsed: ParsedResource) -> None:
             parsed.transcript_id,
             organizer_user_id=parsed.user_id,
         ):
+            logger.info("PROCESS sending summary email...")
             send_summary_email(emails, meeting_title, summary)
             try:
                 mark_email_sent(
@@ -160,12 +186,20 @@ def _process_transcript(parsed: ParsedResource) -> None:
                     claim_id,
                     organizer_user_id=parsed.user_id,
                 )
+                logger.info("PROCESS email_sent flag persisted.")
             except Exception:
                 # Mail already left ACS; persist failure may allow one rare duplicate on retry.
                 logger.exception(
                     "Summary email sent for %s but failed to persist email_sent flag.",
                     parsed.transcript_id,
                 )
+        else:
+            logger.info(
+                "PROCESS skipping email (no recipients or already marked email_sent) transcript_id=%s",
+                parsed.transcript_id,
+            )
+
+        logger.info("PROCESS success transcript_id=%s meeting='%s'", parsed.transcript_id, meeting_title)
     except Exception:
         logger.exception("Failed to process transcript event for meeting %s", parsed.meeting_id)
         if claimed:
@@ -177,14 +211,24 @@ def _process_transcript(parsed: ParsedResource) -> None:
     finally:
         with _inflight_lock:
             _inflight_transcripts.discard(parsed.transcript_id)
+        logger.info("PROCESS finished (thread cleanup) transcript_id=%s", parsed.transcript_id)
 
 
 def _queue_transcript(parsed: ParsedResource) -> None:
     """Graph expects the webhook to answer within seconds, so do the work off-thread."""
     with _inflight_lock:
         if parsed.transcript_id in _inflight_transcripts:
+            logger.info(
+                "QUEUE skip — transcript already in-flight: %s",
+                parsed.transcript_id,
+            )
             return
         _inflight_transcripts.add(parsed.transcript_id)
+    logger.info(
+        "QUEUE starting background thread for transcript_id=%s meeting_id=%s",
+        parsed.transcript_id,
+        parsed.meeting_id,
+    )
     threading.Thread(target=_process_transcript, args=(parsed,), daemon=True).start()
 
 
@@ -193,40 +237,70 @@ def _queue_transcript(parsed: ParsedResource) -> None:
 async def graph_webhook(request: Request):
     validation_token = request.query_params.get("validationToken")
     if validation_token:
+        logger.info("WEBHOOK validation challenge received — echoing token.")
         return Response(content=validation_token, media_type="text/plain", status_code=200)
 
     if request.method == "GET":
+        logger.info("WEBHOOK GET probe — endpoint active.")
         return Response(content="Webhook endpoint is active.", media_type="text/plain", status_code=200)
 
     raw_body = await request.body()
+    logger.info(
+        "WEBHOOK POST received bytes=%d content_type=%s",
+        len(raw_body),
+        request.headers.get("content-type"),
+    )
     if not raw_body.strip():
-        logger.info("Received empty webhook POST body.")
+        logger.info("WEBHOOK empty body — returning 202.")
         return Response(content="", status_code=202)
 
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
-        logger.warning("Received non-JSON webhook POST body.")
+        logger.warning("WEBHOOK non-JSON body — returning 202. preview=%r", raw_body[:200])
         return Response(content="", status_code=202)
 
     if payload.get("lifecycleEvent"):
-        logger.info("Received lifecycle notification: %s", payload.get("lifecycleEvent"))
+        logger.info("WEBHOOK lifecycle notification: %s", payload.get("lifecycleEvent"))
         return Response(content="", status_code=202)
 
     notifications = payload.get("value", [])
     if not isinstance(notifications, list):
-        logger.warning("Unexpected webhook payload format.")
+        logger.warning("WEBHOOK unexpected payload keys=%s", list(payload.keys()))
         return Response(content="", status_code=202)
 
-    for item in notifications:
-        if item.get("clientState") != settings.client_state:
+    logger.info("WEBHOOK notification batch size=%d", len(notifications))
+    for index, item in enumerate(notifications):
+        client_state = item.get("clientState")
+        resource = item.get("resource", "")
+        change_type = item.get("changeType")
+        logger.info(
+            "WEBHOOK[%d] changeType=%s resource=%s clientState_match=%s",
+            index,
+            change_type,
+            resource[:250],
+            client_state == settings.client_state,
+        )
+        if client_state != settings.client_state:
+            logger.warning(
+                "WEBHOOK[%d] skipped — clientState mismatch (got=%r).",
+                index,
+                (client_state or "")[:40],
+            )
             continue
 
-        parsed = parse_graph_resource(item.get("resource", ""))
+        parsed = parse_graph_resource(resource)
         if not parsed:
+            logger.warning("WEBHOOK[%d] skipped — resource parse failed.", index)
             continue
 
         if is_processed(parsed.transcript_id, organizer_user_id=parsed.user_id):
+            logger.info(
+                "WEBHOOK[%d] skipped — already processed/blocked transcript_id=%s user_id=%s",
+                index,
+                parsed.transcript_id,
+                parsed.user_id,
+            )
             continue
 
         _queue_transcript(parsed)

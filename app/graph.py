@@ -33,12 +33,14 @@ def _parse_graph_datetime(value: str | None) -> datetime | None:
 
 
 def _request(method: str, url: str, **kwargs) -> Any:
+    logger.info("Graph API %s %s", method, url)
     with httpx.Client(timeout=30) as client:
         response = client.request(method, url, headers=_headers(kwargs.pop("headers", None)), **kwargs)
     if response.is_error:
         error_body = response.text
         logger.error("Graph API %s %s failed (%s): %s", method, url, response.status_code, error_body)
         response.raise_for_status()
+    logger.info("Graph API %s %s OK (%s)", method, url, response.status_code)
     if response.text:
         if response.headers.get("content-type", "").startswith("application/json"):
             return response.json()
